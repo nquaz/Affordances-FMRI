@@ -1,0 +1,17 @@
+Object
+screwdriver
+pitcher
+bottle
+pitcher
+kettle
+bottle
+pitcher
+kettle
+bottle
+spoon
+hammer
+plier
+spoon
+baseball bat
+tennis racket
+wrench
