@@ -18,4 +18,4 @@ def get_multi_string_embedding(my_strings, tokenizer, embedding_layer):
     reverse_order_str = str.join(' ', my_strings[::-1])
     original_order_embedding = get_single_string_embedding(original_order_str, tokenizer, embedding_layer)
     reverse_order_embedding = get_single_string_embedding(reverse_order_str, tokenizer, embedding_layer)
-    return (original_order_embedding + reverse_order_embedding)/2
+    return (original_order_embedding + reverse_order_embedding)/2 
