@@ -2,7 +2,7 @@ import pandas as pd
 import os
 
 
-def get_stimuli(data_path: str, run: int) -> list[tuple[int, str, str]]:
+def get_stimuli(data_path: str, run: int) -> list[tuple[int, int, str, str]]:
     """
     Get stimuli used for this run
 
@@ -11,7 +11,7 @@ def get_stimuli(data_path: str, run: int) -> list[tuple[int, str, str]]:
         run: run number
 
     Returns:
-        list of stimulus pairs used for this run, each item corresponds to a TR
+        list of tuples consisting of (TR, condition, object 1, object 2)
     """
     # Convert run to gross matlab indexing :p
     run += 1
@@ -19,10 +19,10 @@ def get_stimuli(data_path: str, run: int) -> list[tuple[int, str, str]]:
     # Read the input Excel files (replace with the actual file paths)
     eo_file = os.path.join(data_path, 'stimuli', 'task-affordance_stimuli', 'eo.txt')
     go_file = os.path.join(data_path, 'stimuli', 'task-affordance_stimuli', 'go.txt')
+    eo_list = pd.read_csv(eo_file, dtype = str)
+    go_list = pd.read_csv(go_file, dtype = str)
     condition_file = os.path.join(data_path, 'code', 'task-affordance_1level', 'conditionOrder_8sequences.xlsx')
     catch_file = os.path.join(data_path, 'code', 'task-affordance_1level', 'catchOrder_8sequences.xlsx')
-    eo_list = pd.read_csv(eo_file)
-    go_file = pd.read_csv(go_file)
     order_matrix = pd.read_excel(condition_file, header=None)  # Assuming no headers
     catch_order = pd.read_excel(catch_file, header=None)  # Assuming no headers
 
@@ -46,6 +46,7 @@ def get_stimuli(data_path: str, run: int) -> list[tuple[int, str, str]]:
     # Conditions and object pairs
     condition = order_matrix.iloc[start_tr:end_tr, 2]  # Column 3 in MATLAB corresponds to index 2 in Python
     object_pair = order_matrix.iloc[start_tr:end_tr, 3]  # Column 4 in MATLAB corresponds to index 3 in Python
+    onset = order_matrix.iloc[start_tr:end_tr, 1]
     catch_condition = catch_order.iloc[1, (run - 1) * nCat:run * nCat]  # Row 2 in MATLAB is row index 1 in Python
     catch_pair = catch_order.iloc[0, (run - 1) * nCat:run * nCat]  # Row 1 in MATLAB is row index 0 in Python
 
@@ -53,8 +54,13 @@ def get_stimuli(data_path: str, run: int) -> list[tuple[int, str, str]]:
     tr_to_stim = []
     # Loop through conditions (based on MATLAB's logic)
     for i in range(len(condition)):
-        pair = object_pair.iloc[i]
-        cond = condition.iloc[i]
+        try:
+            pair = int(object_pair.iloc[i])
+            cond = int(condition.iloc[i])
+        except:
+            continue
+        if pair > 16: # this is to only process familiar objects
+            continue
         if cond == 0:  # Condition 0 (do nothing here if needed)
             continue
         elif cond != 9:
@@ -101,5 +107,5 @@ def get_stimuli(data_path: str, run: int) -> list[tuple[int, str, str]]:
                     Eoname_entry = f"EoF{pair}.jpg"
                 else:
                     Eoname_entry = f"EoRF{pair}.jpg"
-        tr_to_stim.append((cond, Eoname_entry, Goname_entry))
+        tr_to_stim.append((onset.iloc[i], cond, eo_list.iloc[pair - 1].iloc[0], go_list.iloc[pair - 1].iloc[0]))
     return tr_to_stim
