@@ -1,8 +1,31 @@
 import pandas as pd
 import os
+import nibabel as nib
+import torch
 
+def get_subject_fmri_data(layout, subject: str):
+    fmri_files = layout.get(subject=subject, extension='nii.gz', datatype='func', return_type='filename',
+                                    task='affordance')
 
-def get_stimuli(data_path: str, run: int) -> list[tuple[int, int, str, str]]:
+    fmri_imgs = [nib.load(fmri_files[run]) for run in range(len(fmri_files))]
+    fmri_data = [fmri_img.get_fdata() for fmri_img in fmri_imgs]
+    fmri_data = [x.T.reshape(x.T.shape[0], -1) for x in fmri_data]
+    return fmri_data
+
+def get_all_fmri_data(layout, n_samples: int = -1):
+    subjects = layout.get_subjects()
+    data = []
+    if n_samples < 0:
+        for subj in subjects:
+            data.append(get_subject_fmri_data(layout, subj))
+    else:
+        for i, subj in enumerate(subjects):
+            if i >= n_samples:
+                break
+            data.append(get_subject_fmri_data(layout, subj))
+    return data
+
+def get_stimuli_run(data_path: str, run: int) -> list[tuple[int, int, int, str, str]]:
     """
     Get stimuli used for this run
 
@@ -107,5 +130,31 @@ def get_stimuli(data_path: str, run: int) -> list[tuple[int, int, str, str]]:
                     Eoname_entry = f"EoF{pair}.jpg"
                 else:
                     Eoname_entry = f"EoRF{pair}.jpg"
-        tr_to_stim.append((onset.iloc[i], cond, eo_list.iloc[pair - 1].iloc[0], go_list.iloc[pair - 1].iloc[0]))
+        tr_to_stim.append((run, onset.iloc[i], cond, eo_list.iloc[pair - 1, 0], go_list.iloc[pair - 1, 0]))
     return tr_to_stim
+
+def get_all_stimuli(data_path: str, runs: int = 8):
+    data = []
+    for run in range(runs):
+        data += get_stimuli_run(data_path, run)
+    return pd.DataFrame(data, columns = ['run', 'onset', 'condition', 'object1', 'object2'])
+
+def get_single_string_embedding(my_string, tokenizer, embedding_layer):
+    """Returns the embedding of a single string by averaging the embeddings of its tokens"""
+    assert len(my_string) > 0, "Input string is empty"
+    assert type(my_string) == str, "Input should be a string"
+    tokens = tokenizer(my_string, add_special_tokens=False)['input_ids']
+    return embedding_layer(torch.tensor(tokens)).detach().cpu().numpy().mean(0)
+
+
+def get_multi_string_embedding(my_strings, tokenizer, embedding_layer):
+    """Takes in a list of two strings, and returns a single embedding for both jointly by averaging passing them in one order or the other"""
+    #FIXME it seems like the way it's being loaded/used now, BERT isn't actually using positional embedding so this isn't strictly necessary
+    assert len(my_strings) == 2, "This should only take two strings"
+    original_order_str = str.join(' ', my_strings)
+    reverse_order_str = str.join(' ', my_strings[::-1])
+    original_order_embedding = get_single_string_embedding(original_order_str, tokenizer, embedding_layer)
+    reverse_order_embedding = get_single_string_embedding(reverse_order_str, tokenizer, embedding_layer)
+    return (original_order_embedding + reverse_order_embedding)/2
+
+
