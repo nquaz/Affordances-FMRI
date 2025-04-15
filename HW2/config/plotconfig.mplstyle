@@ -1,0 +1,18 @@
+# Base font settings (this is what other sizes are relative to)
+font.size: 14
+font.family: sans-serif
+font.sans-serif: Arial, Helvetica, DejaVu Sans
+
+# Axes settings
+axes.titlesize: larger
+xtick.labelsize: smaller
+ytick.labelsize: smaller
+legend.fontsize: smaller
+axes.facecolor: white
+
+# Figure settings
+figure.titlesize: 21
+figure.figsize: 15, 10
+lines.linewidth: 2
+lines.markersize: 5
+axes.grid: False
