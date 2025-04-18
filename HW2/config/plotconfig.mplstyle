@@ -7,12 +7,22 @@ font.sans-serif: Arial, Helvetica, DejaVu Sans
 axes.titlesize: larger
 xtick.labelsize: smaller
 ytick.labelsize: smaller
+axes.grid: False
+axes.spines.top: False
+axes.spines.right: False
+axes.facecolor: (0,0,0,0)
+
+# Legend settings
 legend.fontsize: smaller
-axes.facecolor: white
+legend.facecolor: white
+legend.framealpha: 1
+legend.edgecolor: black
+legend.labelcolor: black
+legend.borderpad: 0.4
 
 # Figure settings
 figure.titlesize: 21
-figure.figsize: 15, 10
+figure.figsize: 20, 10
+figure.facecolor: (0,0,0,0)
 lines.linewidth: 2
 lines.markersize: 5
-axes.grid: False
