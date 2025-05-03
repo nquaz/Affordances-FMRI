@@ -7,3 +7,14 @@ Install HW2 dependencies plus the following
 + nilearn 
 + torchvision
 Also download the speechmodeling tutorial https://github.com/HuthLab/speechmodeltutorial and R3M https://github.com/facebookresearch/r3m
+
+# Filestructure
++ config
+  + matplotlib styling sheets
++ data
+  + fMRI files
++ notebooks
+  + jupyter notebooks to perform analysis
++ scripts
+  + utility functions
++ 
