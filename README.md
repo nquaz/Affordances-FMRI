@@ -17,4 +17,5 @@ Also download the speechmodeling tutorial https://github.com/HuthLab/speechmodel
   + jupyter notebooks to perform analysis
 + scripts
   + utility functions
-+ 
++ figures
+  + generated figures
