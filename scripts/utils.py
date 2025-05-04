@@ -1,9 +1,12 @@
+from collections import defaultdict
 from collections.abc import Iterable
+from typing import Any
 
 import numpy as np
 from nilearn.image import resample_to_img
 from numpy._typing import ArrayLike
-from transformers import AutoTokenizer, AutoModel
+from transformers import CLIPProcessor, CLIPModel, AutoTokenizer, AutoModel, AutoModelForCausalLM
+from torchvision.models import resnet50
 import torch
 from PIL import Image
 from nilearn import image
@@ -11,15 +14,20 @@ import os
 from os.path import join
 import shutil
 from tqdm import tqdm
+import torchvision.transforms as T
 from nilearn.plotting import  plot_glass_brain
 from scipy.stats import pearsonr, zscore, spearmanr
 from scipy.spatial.distance import squareform, pdist
 from nilearn.masking import apply_mask, unmask
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import seaborn as sns
 from nilearn import datasets
 from nilearn.maskers import NiftiLabelsMasker
 import nibabel as nib
+
+from r3m import load_r3m
+import pandas as pd
 
 ## TEXT UTILS
 def get_single_string_embedding(my_string, tokenizer, embedding_layer):
@@ -41,7 +49,25 @@ def get_multi_string_embedding(my_strings, tokenizer, embedding_layer):
     return (original_order_embedding + reverse_order_embedding)/2
 
 
-def load_fmri(fmri_dir: str, brainmask_img: nib.nifti1.Nifti1Image, run_name_template: str, all_run_numbers: list[int], ROI: str='whole', img: bool = False) -> dict[int, ArrayLike]:
+def int_to_color(val, vmin=0, vmax=100, cmap_name='viridis'):
+    """
+    Map integer to color
+
+    Args:
+        val:
+        vmin:
+        vmax:
+        cmap_name:
+
+    Returns:
+
+    """
+    norm = plt.Normalize(vmin, vmax)
+    cmap = cm.get_cmap(cmap_name)
+    return cmap(norm(val))
+
+
+def load_fmri(fmri_dir: str, brainmask_img: nib.nifti1.Nifti1Image, run_name_template: str, all_run_numbers: list[int], ROI: str=None, img: bool = False) -> dict[int, ArrayLike]:
     """
     Load fMRI from specified directory and list of runs
 
@@ -58,6 +84,8 @@ def load_fmri(fmri_dir: str, brainmask_img: nib.nifti1.Nifti1Image, run_name_tem
     """
     runs_fmri = {}
     runs_img = {}
+    if ROI is None:
+        ROI = 'whole'
     if ROI != 'whole':
         atlas = datasets.fetch_atlas_harvard_oxford("cort-maxprob-thr25-2mm")
 
@@ -205,7 +233,8 @@ def compute_sig_voxels(runs_fmri, test_run_numbers, log = False, crop_at = 296, 
         sig_test[fail_idx:] = False
         sig_voxels[run_number] = sig_test[p_ranks]
         if log:
-            print(f'proportion of significant voxels {run_number}v3 {sig_voxels[run_number].sum()/n_voxels}')
+            # print(f'proportion of significant voxels {run_number}v3 {sig_voxels[run_number].sum()/n_voxels}')
+            print(f'proportion of significant voxels {run_number}v3 {sig_voxels[run_number].sum()}')
     return rs, ps, sorted_voxels, sig_voxels
 
 
@@ -237,6 +266,218 @@ def load_frames(frames_dir: str, all_run_numbers: list[int], test_run_numbers: l
         runs_frames[run_number] = np.array(imgs)
     return runs_frames
 
+def stimulus_gif_maker(run_number, runs_frames, fps: int, target_size = (256, 256),  skip_frames: int = 1):
+    """
+    Generate GIF for specified run from its frames.
+
+    Args:
+        run_number:
+        runs_frames:
+        fps:
+        target_size:
+        skip_frames:
+
+    Returns:
+
+    """
+    imgs = []
+    for img in tqdm(runs_frames[run_number]):  # [::(FPS//skip_frames)*TR]
+        imgs.append(
+            Image.fromarray(img).resize(target_size, Image.Resampling.NEAREST))  # resize image for memory reasons
+    # duration is the number of milliseconds between frames
+    imgs[0].save(f"run{run_number}_stimulus.gif", save_all=True, append_images=imgs[1:],
+                 duration=1 / fps * skip_frames * 1000, loop=0)
+
+def load_CLIP_embeddings(runs_frames: dict[int, ArrayLike], all_run_numbers: list[int], test_run_numbers: list[int]) -> dict[int, ArrayLike]:
+    """
+    Load CLIP embeddings of frames.
+
+    Args:
+        runs_frames: dictionary mapping runs to frames
+        all_run_numbers: list of specified runs
+        test_run_numbers: list of test runs
+
+    Returns:
+        dictionary mapping runs to CLIP embeddings of frames
+    """
+    # Get embeddings from CLIP
+    # Load the pretrained model and processor
+    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32", use_fast=True)
+    runs_CLIP = {}
+    for run_number in all_run_numbers:
+        if run_number == test_run_numbers[1]:
+            runs_CLIP[test_run_numbers[1]] = runs_CLIP[test_run_numbers[0]]
+            break
+        runs_CLIP[run_number] = []
+        for img in tqdm(runs_frames[run_number]):
+            inputs = processor(images=img, return_tensors="pt")
+            with torch.no_grad():  # No need for gradients
+                image_features = model.get_image_features(**inputs)
+
+            # Normalize the embeddings (useful for similarity comparisons)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+            # Convert to numpy if needed
+            embedding = image_features.cpu().numpy().flatten().squeeze()
+            runs_CLIP[run_number].append(embedding)
+        runs_CLIP[run_number] = np.array(runs_CLIP[run_number])
+    return runs_CLIP
+
+
+def load_R3M_embeddings(runs_frames: dict[int, ArrayLike], all_run_numbers: list[int], test_run_numbers: list[int], transforms = None) -> dict[int, ArrayLike]:
+    """
+    Load R3M embeddings of frames.
+
+    Args:
+        runs_frames: dictionary mapping runs to frames
+        all_run_numbers: list of specified runs
+        test_run_numbers: list of test runs
+        transforms: transform to apply to image
+
+    Returns:
+        dictionary mapping runs to R3M embeddings of frames
+    """
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+    r3m = load_r3m("resnet50")  # resnet18, resnet34, resnet50
+    r3m.eval()
+    r3m.to(device)
+
+    ## DEFINE PREPROCESSING
+    if transforms is None:
+        transforms = T.Compose([T.Resize(256),
+                                T.CenterCrop(224),  # NOTE even if you don't crop the image, the model will crop to 224x224!
+                                T.ToTensor()])  # ToTensor() divides by 255
+
+    runs_R3M = {}
+    for run_number in all_run_numbers:
+        if run_number == test_run_numbers[1]:
+            runs_R3M[test_run_numbers[1]] = runs_R3M[test_run_numbers[0]]
+            break
+        runs_R3M[run_number] = []
+        for img in tqdm(runs_frames[run_number]):
+            preprocessed = transforms(Image.fromarray(img, 'RGB')).reshape(-1, 3, 224, 224)
+            preprocessed = preprocessed.to(device)
+
+            # Get embedding
+            with torch.no_grad():
+                embedding = r3m(preprocessed * 255.0)
+
+            # Convert to numpy if needed
+            embedding = embedding.cpu().numpy()[0].flatten().squeeze()
+            runs_R3M[run_number].append(embedding)
+        runs_R3M[run_number] = np.array(runs_R3M[run_number])
+    return runs_R3M
+
+def load_resnet50_embeddings(runs_frames: dict[int, ArrayLike], all_run_numbers: list[int], test_run_numbers: list[int], transforms = None) -> dict[int, ArrayLike]:
+    """
+    Load resnet50 embeddings of frames.
+
+    Args:
+        runs_frames: dictionary mapping runs to frames
+        all_run_numbers: list of specified runs
+        test_run_numbers: list of test runs
+        transforms: transform to apply to image
+
+    Returns:
+        dictionary mapping runs to resnet50 embeddings of frames
+    """
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+
+    ## DEFINE PREPROCESSING
+    if transforms is None:
+        transforms = T.Compose([T.Resize(256),
+                                T.CenterCrop(224),  # NOTE even if you don't crop the image, the model will crop to 224x224!
+                                T.ToTensor()])  # ToTensor() divides by 255
+
+
+    resnet = resnet50(pretrained=True).to(
+        device)  # https://pytorch.org/vision/main/models/generated/torchvision.models.resnet50.html#torchvision.models.resnet50
+    resnet.eval()
+    runs_resnet50 = {}
+    for run_number in all_run_numbers:
+        if run_number == test_run_numbers[1]:
+            runs_resnet50[test_run_numbers[1]] = runs_resnet50[test_run_numbers[0]]
+            break
+        runs_resnet50[run_number] = []
+        for img in tqdm(runs_frames[run_number]):
+            preprocessed = transforms(Image.fromarray(img, 'RGB')).reshape(-1, 3, 224, 224)
+            preprocessed = preprocessed.to(device)
+
+            # Get embedding
+            with torch.no_grad():
+                embedding = resnet(preprocessed * 255.0)
+
+            # Convert to numpy if needed
+            embedding = embedding.cpu().numpy()[0].flatten().squeeze()
+            runs_resnet50[run_number].append(embedding)
+        runs_resnet50[run_number] = np.array(runs_resnet50[run_number])
+    return runs_resnet50
+
+
+def load_text_embeddings(runs_narration: pd.DataFrame, all_run_numbers: list[int], test_run_numbers: list[int], tr: int,  model_name="gpt2", layer=12, bad_to_good_words: dict[str, str] = None) -> (dict[int, ArrayLike], dict[int, ArrayLike]):
+    """
+    Get text embeddings of narrations. Converts narrations to acceptable list of words.
+
+    Args:
+        runs_narration: DataFrame of annotations
+        all_run_numbers: list of specified runs
+        test_run_numbers: list of test runs
+        tr: duration of each TR
+        model_name: pretrained model to load from transformers package
+        layer: layer to extract embeddings from
+
+    Returns:
+        - dictionary mapping runs to text embeddings of narrations
+        - dictionary mapping runs to TRs that were annotated
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # model = AutoModel.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    embedding_layer = model.get_input_embeddings()
+
+    # Load annotations
+    runs_narration['start_frame'] = runs_narration['start_frame'].astype(int)
+    runs_narration['stop_frame'] = runs_narration['stop_frame'].astype(int)
+    runs_narration['start_TR'] = (runs_narration['run_start_seconds'] // tr).astype(int)
+    runs_narration['stop_TR'] = (runs_narration['run_stop_seconds'] // tr).astype(int)
+
+    # Get text embeddings
+    runs_mdl = {}
+    for x in runs_narration.itertuples():
+        run = x.run
+        start_TR = x.start_TR
+        stop_TR = x.stop_TR
+        noun = x.noun
+        verb = x.verb
+
+        # Map onto acceptable words
+        if bad_to_good_words and noun in bad_to_good_words:
+            noun = bad_to_good_words[noun]
+        if bad_to_good_words and verb in bad_to_good_words:
+            verb = bad_to_good_words[verb]
+
+        # For each TR that received this annotation, get the embedding of the noun and verb
+        # This will result in these TRs sharing this same embedding
+        # Sometimes, TRs will overlap in their annotations. We collect all the embeddings for a given TR in a list.
+        if run not in runs_mdl:
+            runs_mdl[run] = defaultdict(list)
+        for tr in range(stop_TR, start_TR - 1, - 1):
+            runs_mdl[run][tr] += [get_multi_string_embedding([noun, verb], tokenizer, embedding_layer)]
+
+    # Track the location of annotated TRs
+    runs_TRs = {}
+    for k,v  in runs_mdl.items():
+        runs_TRs[k] = np.array(sorted(list(v.keys()))).astype(int)
+    runs_TRs[test_run_numbers[1]] = runs_TRs[test_run_numbers[0]]
+    return runs_mdl, runs_TRs
+
 # Taken from speechmodeltutorial
 def delay_mat(stim, delays, circpad=False):
     """Creates non-interpolated concatenated delayed versions of [stim] with the given [delays]
@@ -261,10 +502,59 @@ def delay_mat(stim, delays, circpad=False):
         dstims.append(dstim)
     return np.hstack(dstims)
 
+def delay_embeddings(delays, embeddings, all_run_numbers, test_run_numbers) -> dict[int, Any]:
+    """
+    Delay the embeddings.
+
+    Args:
+        delays:
+        embeddings:
+        all_run_numbers:
+        test_run_numbers:
+
+    Returns:
+
+    """
+    delayed_embeddings = {}
+    for run_number in all_run_numbers:
+        if run_number == test_run_numbers[1]:
+            delayed_embeddings[test_run_numbers[1]] = delayed_embeddings[test_run_numbers[0]]
+            break
+        delayed_embeddings[run_number] = []
+        delayed_embeddings[run_number] = delay_mat(embeddings[run_number], delays)
+    return delayed_embeddings
+
+
+def drop_fixation_TRs_from_fmri(runs_fmri, tr = 2, preproc_dropped_trs: int = 2, startup_blank_screen_secs: float = 20, ending_blank_screen_secs: float = 20, keep_TRs: dict[int, Iterable[int]] = None, log: bool = False) -> dict[int, ArrayLike]:
+    # Calculate how many TRs to drop from the start and end of each run
+    nTRs_drop_from_start = int((startup_blank_screen_secs / tr) - preproc_dropped_trs)  # Should be 8
+    nTRs_drop_from_end = int((startup_blank_screen_secs / tr))  # Should be 10
+
+    total_TRs_to_drop = nTRs_drop_from_start + nTRs_drop_from_end
+
+    if log:
+        print(f'{nTRs_drop_from_start} TRs dropped from the START of each run')
+        print(f'{nTRs_drop_from_end} TRs dropped from the END of each run')
+
+    runs_fmri_dropped = {}
+    for run_number in runs_fmri.keys():
+        init_nTR = runs_fmri[run_number].shape[0]
+        runs_fmri_dropped[run_number] = runs_fmri[run_number][nTRs_drop_from_start:-nTRs_drop_from_end,
+                                :]  # Drop TRs from start and end of the run
+
+        out_nTR = runs_fmri_dropped[run_number].shape[0]
+        assert init_nTR - out_nTR == total_TRs_to_drop
+
+    # Keep only specified TRs
+    if keep_TRs:
+        for run_number, trs in keep_TRs.items():
+            valid_trs = trs < runs_fmri_dropped[run_number].shape[0] # edge case where TR is annotated but overlaps with the fixation period
+            runs_fmri_dropped[run_number] = runs_fmri_dropped[run_number][trs[valid_trs]]
+    return runs_fmri_dropped
 
 def average_embeddings_per_TR(fps, skip_frames, dim_embeddings, TR_length, runs_data, runs_TRs):
     """
-    Average the embeddings in each TR. Embeddings are assumed to correspond to frames.
+    Average the embeddings in each TR. Embeddings are assumed to correspond to frames. Assumes non-video TRs have been dropped from the beginning.
 
     Args:
         fps: the fps of the original stimulus that the embeddings were taken from
@@ -283,16 +573,18 @@ def average_embeddings_per_TR(fps, skip_frames, dim_embeddings, TR_length, runs_
     frames_per_TR = int(sample_hz * TR_length)
     runs_avg = {}
     for run_number, run_data in tqdm(runs_data.items()):
-        nTRs = len(runs_TRs[run_number])
+        nTRs = len(runs_TRs[run_number]) # num annotated TRs for this run
         runs_avg[run_number] = np.zeros((nTRs, dim_embeddings))
-        tr_list = sorted(runs_TRs[run_number])
+        tr_list = sorted(runs_TRs[run_number]) # these are the annotated TR indices
 
         # For each specified TR in run
         for i, tr in enumerate(tr_list):
-            if (tr+1)*frames_per_TR > len(run_data): # if not enough embeddings at the end to average over
-                avg_embedding = np.average(run_data[tr*frames_per_TR:], axis = 0)
+            start_frame = tr*frames_per_TR
+            end_frame = (tr + 1) * frames_per_TR
+            if end_frame > len(run_data): # if not enough embeddings at the end to average over
+                avg_embedding = np.average(run_data[start_frame:], axis = 0)
             else:
-                avg_embedding = np.average(run_data[tr*frames_per_TR:(tr+1)*frames_per_TR], axis = 0) # Average embeddings that fall inside the same TR
+                avg_embedding = np.average(run_data[start_frame:end_frame], axis = 0) # Average embeddings that fall inside the same TR
             runs_avg[run_number][i] = avg_embedding
     return runs_avg
 
@@ -344,13 +636,13 @@ def get_RDM_run_index(run, runs_shape):
 
     Args:
         run: run number
-        runs_shape: dictionary mapping runs to any data of the shape (TR, voxels)
+        runs_shape: dictionary mapping runs to any data of the shape (TR, Any)
 
     Returns:
         the start and end index of the run along either axis of the RDM
     """
 
-    # Take any dictionary mapping runs to an array of shape (TR, voxels)
+    # Take any dictionary mapping runs to an array of shape (TR, Any)
     start_idx, end_idx = 0, 0
     for i in range(run):
         if i > 0:
